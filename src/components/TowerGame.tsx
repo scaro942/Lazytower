@@ -14,6 +14,8 @@ import {
   themeForFloor,
   CLASSES,
   type ClassId,
+  RARITY_LABEL,
+  RARITY_COLOR,
 } from "@/lib/game/tower";
 
 type Snapshot = {
@@ -375,18 +377,41 @@ function RewardOverlay({
         </div>
         <div className="grid gap-3 md:grid-cols-3">
           {snap.rewards.map((r, i) => {
-            const title = r.kind === "relic" ? r.relic.name : "완전 회복";
+            const title =
+              r.kind === "relic"
+                ? r.relic.name
+                : r.kind === "souls"
+                  ? `영혼 ${r.amount}`
+                  : "완전 회복";
             const desc =
-              r.kind === "relic" ? r.relic.desc : "HP 40 회복. 위험한 층 전에 안전 선택.";
-            const tag = r.kind === "relic" ? "유물" : "회복";
+              r.kind === "relic"
+                ? r.relic.desc
+                : r.kind === "souls"
+                  ? "로비 영구 성장에 쓰이는 영혼을 즉시 획득."
+                  : "HP 40 회복. 위험한 층 전에 안전 선택.";
+            const rarity = r.kind === "relic" ? r.relic.rarity : null;
+            const tag = rarity
+              ? RARITY_LABEL[rarity]
+              : r.kind === "souls"
+                ? "영혼"
+                : "회복";
+            const accentColor = rarity
+              ? RARITY_COLOR[rarity]
+              : r.kind === "souls"
+                ? "#ffd54a"
+                : "#8fb4ff";
             return (
               <button
                 key={i}
                 onClick={() => onChoose(i)}
-                className="group relative flex h-48 flex-col items-start justify-between rounded-sm border border-border bg-card p-5 text-left transition-all hover:-translate-y-0.5 hover:border-accent hover:bg-secondary"
+                className="group relative flex h-48 flex-col items-start justify-between rounded-sm border border-border bg-card p-5 text-left transition-all hover:-translate-y-0.5 hover:bg-secondary"
+                style={{ borderColor: accentColor + "44" }}
               >
                 <div>
-                  <div className="font-mono-tight text-[10px] tracking-widest text-muted-foreground group-hover:text-accent">
+                  <div
+                    className="font-mono-tight text-[10px] tracking-widest"
+                    style={{ color: accentColor }}
+                  >
                     {tag}
                   </div>
                   <div className="mt-1 text-lg font-semibold tracking-tight">{title}</div>
