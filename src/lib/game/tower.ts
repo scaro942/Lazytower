@@ -160,6 +160,10 @@ export const SKILLS: Record<string, SkillDef> = {
     cooldown: 22,
     cast: (g) => {
       const p = g.player;
+      // 지연 생성되는 히트박스는 cast()가 끝난 뒤 실행되므로
+      // 스킬 보너스를 미리 계산해 캡처해 둔다.
+      let dmg = (18 + g.stats.atk * 0.5) * (1 + g.stats.skillDmgAdd);
+      if (g.echoActive) dmg *= 0.5;
       for (let i = 0; i < 8; i++) {
         setTimeout(() => {
           if (g.destroyed || g.phase !== "playing") return;
@@ -169,9 +173,10 @@ export const SKILLS: Record<string, SkillDef> = {
             y: g.groundY - 60,
             w: 44,
             h: 80,
-            dmg: 18 + g.stats.atk * 0.5,
+            dmg,
             life: 0.14,
             knockback: 180,
+            isSkill: true,
           });
           g.shake = Math.max(g.shake, 6);
         }, i * 80);
@@ -187,6 +192,9 @@ export const SKILLS: Record<string, SkillDef> = {
     cooldown: 4,
     cast: (g) => {
       const p = g.player;
+      // 2타는 지연 생성이므로 스킬 보너스를 미리 계산해 캡처
+      let dmg2 = (16 + g.stats.atk * 0.6) * (1 + g.stats.skillDmgAdd);
+      if (g.echoActive) dmg2 *= 0.5;
       spawnHitbox(g, {
         x: p.x - 80,
         y: p.y - 50,
@@ -203,9 +211,10 @@ export const SKILLS: Record<string, SkillDef> = {
           y: p.y - 50,
           w: 160,
           h: 60,
-          dmg: 16 + g.stats.atk * 0.6,
+          dmg: dmg2,
           life: 0.15,
           knockback: 260,
+          isSkill: true,
         });
         g.shake = Math.max(g.shake, 8);
       }, 180);
@@ -258,18 +267,32 @@ export const SKILLS: Record<string, SkillDef> = {
   fortify: {
     id: "fortify",
     name: "철벽",
-    desc: "잠시 무적이 되고 HP를 회복한다",
+    desc: "2초간 무적. 주변을 밀쳐내고 HP 30 회복",
     cooldown: 14,
     cast: (g) => {
-      g.player.iframes = Math.max(g.player.iframes, 1.6);
-      g.player.hp = Math.min(g.stats.maxHp, g.player.hp + g.stats.maxHp * 0.2);
-      for (let i = 0; i < 12; i++) {
+      // 무적을 길게(2초) 줘서 '버티는' 정체성을 강화하고,
+      // 회복은 고정값으로 — 최대HP 비례였을 때 후반 무한 자힐이 됐다.
+      g.player.iframes = Math.max(g.player.iframes, 2);
+      g.player.hp = Math.min(g.stats.maxHp, g.player.hp + 30);
+      // 주변 적을 밀어내는 충격파 (버티기 위한 공간 확보)
+      spawnHitbox(g, {
+        x: g.player.x - 90,
+        y: g.player.y - 60,
+        w: 180,
+        h: 70,
+        dmg: 10 + g.stats.atk * 0.3,
+        life: 0.2,
+        knockback: 380,
+      });
+      g.shake = Math.max(g.shake, 7);
+      for (let i = 0; i < 16; i++) {
+        const ang = (i / 16) * Math.PI * 2;
         g.particles.push({
           x: g.player.x,
           y: g.player.y - 26,
-          vx: (Math.random() - 0.5) * 120,
-          vy: -60 - Math.random() * 100,
-          life: 0.6,
+          vx: Math.cos(ang) * 180,
+          vy: Math.sin(ang) * 120 - 40,
+          life: 0.5,
           color: "#8fb4ff",
         });
       }
@@ -315,6 +338,9 @@ export const SKILLS: Record<string, SkillDef> = {
     cooldown: 16,
     cast: (g) => {
       const p = g.player;
+      // 스킬 보너스를 투사체 피해에도 적용 (메아리면 절반)
+      let dmg = (12 + g.stats.atk * 0.4) * (1 + g.stats.skillDmgAdd);
+      if (g.echoActive) dmg *= 0.5;
       for (let i = -3; i <= 3; i++) {
         const ang = (i / 3) * 0.6;
         g.projectiles.push({
@@ -325,7 +351,7 @@ export const SKILLS: Record<string, SkillDef> = {
           w: 14,
           h: 6,
           life: 1.2,
-          dmg: 12 + g.stats.atk * 0.4,
+          dmg,
           fromEnemy: false,
         });
       }
@@ -344,17 +370,6 @@ export const RELICS: Relic[] = [
     apply: (g) => (g.stats.atk += 6),
   },
   {
-    id: "ironHeart",
-    name: "강철 심장",
-    desc: "최대 HP +30, HP 30 회복",
-    rarity: "common",
-    maxStack: 3,
-    apply: (g) => {
-      g.stats.maxHp += 30;
-      g.player.hp = Math.min(g.stats.maxHp, g.player.hp + 30);
-    },
-  },
-  {
     id: "swiftBoots",
     name: "질풍의 장화",
     desc: "이동속도 +10%, 대시 쿨 -10%",
@@ -366,7 +381,50 @@ export const RELICS: Relic[] = [
       g.stats.dashCdAdd += 0.1;
     },
   },
+  {
+    id: "hardenedSkin",
+    name: "굳은 살갗",
+    desc: "받는 피해 -6%",
+    rarity: "common",
+    maxStack: 3,
+    apply: (g) => (g.stats.dmgTakenMul *= 0.94),
+  },
+  {
+    id: "runedGrip",
+    name: "룬 각인 손잡이",
+    desc: "스킬 피해 +20%",
+    rarity: "common",
+    maxStack: 3,
+    apply: (g) => (g.stats.skillDmgAdd += 0.2),
+  },
   // ── 희귀(rare) ──
+  {
+    id: "swiftCasting",
+    name: "속성의 부적",
+    desc: "스킬 쿨다운 -15%",
+    rarity: "rare",
+    maxStack: 3,
+    apply: (g) => (g.stats.skillCdAdd += 0.15),
+  },
+  {
+    id: "leechSigil",
+    name: "갈증의 인장",
+    desc: "스킬 적중 시 HP +6 회복",
+    rarity: "rare",
+    maxStack: 2,
+    apply: (g) => (g.stats.skillLifesteal += 6),
+  },
+  {
+    id: "ironHeart",
+    name: "강철 심장",
+    desc: "최대 HP +25, HP 25 회복",
+    rarity: "rare",
+    maxStack: 2,
+    apply: (g) => {
+      g.stats.maxHp += 25;
+      g.player.hp = Math.min(g.stats.maxHp, g.player.hp + 25);
+    },
+  },
   {
     id: "berserker",
     name: "광전사의 문양",
@@ -430,14 +488,22 @@ export const RELICS: Relic[] = [
   {
     id: "titanLegacy",
     name: "거인의 유산",
-    desc: "최대 HP +60, 공격력 +12",
+    desc: "최대 HP +80, 공격력 +15",
     rarity: "legendary",
     maxStack: 1,
     apply: (g) => {
-      g.stats.maxHp += 60;
-      g.player.hp = Math.min(g.stats.maxHp, g.player.hp + 60);
-      g.stats.atk += 12;
+      g.stats.maxHp += 80;
+      g.player.hp = Math.min(g.stats.maxHp, g.player.hp + 80);
+      g.stats.atk += 15;
     },
+  },
+  {
+    id: "echoStone",
+    name: "메아리의 돌",
+    desc: "스킬이 0.4초 뒤 절반 위력으로 한 번 더 발동",
+    rarity: "legendary",
+    maxStack: 1,
+    apply: (g) => (g.stats.skillEcho = true),
   },
   {
     id: "arcaneShard",
@@ -492,7 +558,20 @@ function rollRelics(count: number, stacks: Record<string, number>): Relic[] {
 }
 
 // ─── classes (전직) ────────────────────────────────────────────────
-export type ClassId = "wanderer" | "berserker" | "guardian" | "assassin";
+export type ClassId =
+  | "wanderer"
+  | "berserker"
+  | "guardian"
+  | "assassin"
+  // 2차 전직 전용 상위 직업 (1차를 건너뛴 보상)
+  | "warlord"
+  | "templar"
+  | "reaper";
+
+// 상위 직업 여부
+export function isAdvancedClass(id: ClassId): boolean {
+  return id === "warlord" || id === "templar" || id === "reaper";
+}
 
 export type ClassDef = {
   id: ClassId;
@@ -553,10 +632,63 @@ export const CLASSES: Record<ClassId, ClassDef> = {
       g.stats.maxJumps = 3;
     },
   },
+
+  // ── 상위 직업 (2차 전직 전용) ──
+  // 1차 전직을 포기하고 방랑자로 20개 층을 버틴 대가로, 기본 직업보다
+  // 확실히 강한 성능을 준다.
+  warlord: {
+    id: "warlord",
+    name: "전쟁군주",
+    desc: "광전사의 상위. 압도적 공격력과 처치 시 폭주. HP는 낮다.",
+    color: "#ff5233",
+    loadout: ["whirlwind", "dashSlash", "bloodFury"],
+    apply: (g) => {
+      g.stats.atk = Math.round(g.stats.atk * 1.6);
+      g.stats.maxHp = Math.round(g.stats.maxHp * 0.85);
+      g.stats.lifesteal += 5;
+      g.stats.killHaste = 1;
+      g.stats.critChance += 0.15;
+      g.stats.finisherAdd += 0.4;
+    },
+  },
+  templar: {
+    id: "templar",
+    name: "성전기사",
+    desc: "수호기사의 상위. 극한의 방어력에 공격력까지 갖췄다.",
+    color: "#5b8dff",
+    loadout: ["shieldBash", "groundSlam", "fortify"],
+    apply: (g) => {
+      g.stats.maxHp = Math.round(g.stats.maxHp * 1.6);
+      g.stats.dmgTakenMul *= 0.65;
+      g.stats.atk = Math.round(g.stats.atk * 1.15);
+      g.stats.lifesteal += 3;
+    },
+  },
+  reaper: {
+    id: "reaper",
+    name: "사신",
+    desc: "암살자의 상위. 치명적인 일격과 압도적 기동력.",
+    color: "#a56bff",
+    loadout: ["shadowStep", "dashSlash", "fanOfKnives"],
+    apply: (g) => {
+      g.stats.moveMul *= 1.3;
+      g.stats.dashCdMul *= 0.55;
+      g.stats.critChance += 0.45;
+      g.stats.critMul = 2.6;
+      g.stats.maxHp = Math.round(g.stats.maxHp * 0.95);
+      g.stats.maxJumps = 3;
+      g.stats.atk = Math.round(g.stats.atk * 1.2);
+    },
+  },
 };
 
 // 전직 제단이 등장하는 층 (해당 층 진입 시 선택 기회)
-export const CLASS_ALTAR_FLOORS = [5, 25];
+// 전직 제단이 등장하는 층. 테마 경계(5층 주기)에 맞춘다.
+// 6층 = 1차 전직(기본 3직업, 건너뛰기 가능)
+// 26층 = 2차 전직. 1차를 건너뛴 경우에만 열리며, 상위 직업을 준다.
+export const CLASS_ALTAR_1 = 6;
+export const CLASS_ALTAR_2 = 26;
+export const CLASS_ALTAR_FLOORS = [CLASS_ALTAR_1, CLASS_ALTAR_2];
 
 // ─── floor rules ───────────────────────────────────────────────────
 export const FLOOR_RULES: Record<number, FloorRule> = {
@@ -726,6 +858,7 @@ export type Hitbox = Rect & {
   follow?: boolean;
   fromEnemy?: boolean;
   knockback?: number;
+  isSkill?: boolean; // 스킬로 생성된 히트박스 (스킬 흡혈 등에 사용)
   hits: Set<number>;
 };
 
@@ -781,6 +914,11 @@ export type Stats = {
   fireOnHit: number; // 타격 시 추가 화상 피해 (즉시 적용, DoT 간이 구현)
   projectileOnHit: boolean; // 타격 시 마법 투사체 추가 발사
   spirit: number; // 정령 스택 수 (0=없음). 스택마다 발사 주기 2초 단축
+  // ── 스킬 빌드용 ──
+  skillDmgAdd: number; // 스킬 피해 가산 비율 (0.3 = +30%)
+  skillCdAdd: number; // 스킬 쿨다운 감소 가산 비율
+  skillLifesteal: number; // 스킬 적중 시 회복량
+  skillEcho: boolean; // 스킬이 0.4초 뒤 한 번 더 발동(피해 50%)
   // ── 유물 합연산 누적치 (스택해도 선형 증가) ──
   moveAdd: number; // 이동속도 가산 비율
   dashCdAdd: number; // 대시 쿨 감소 가산 비율
@@ -813,7 +951,17 @@ function overlap(a: Rect, b: Rect) {
 
 let hbId = 0;
 function spawnHitbox(g: Game, o: Omit<Hitbox, "hits">) {
-  g.hitboxes.push({ ...o, hits: new Set() });
+  // 스킬 cast() 중 생성된 아군 히트박스는 스킬 판정을 받아 보너스가 붙는다.
+  // o.isSkill이 이미 true면 호출부(지연 생성 등)가 보너스를 계산해 넘긴
+  // 것이므로 여기서 중복 적용하지 않는다.
+  const preMarked = o.isSkill === true;
+  const isSkill = preMarked || (g.castingSkill && !o.fromEnemy);
+  let dmg = o.dmg;
+  if (isSkill && !preMarked) {
+    dmg *= 1 + g.stats.skillDmgAdd;
+    if (g.echoActive) dmg *= 0.5; // 메아리 재발동은 절반 피해
+  }
+  g.hitboxes.push({ ...o, dmg, isSkill, hits: new Set() });
   hbId++;
 }
 
@@ -1153,6 +1301,10 @@ export class Game {
   relicStacks: Record<string, number> = {}; // 유물별 획득 횟수 (스택 상한 체크용)
   spiritCd = 0; // 수호 정령 발사 쿨다운
   animClock = 0; // 렌더 연출용 누적 시간 (정령 공전 등)
+  // 스킬 cast() 실행 중임을 표시. 이 동안 생성되는 히트박스/투사체는
+  // 스킬 판정을 받아 skillDmgAdd 등 스킬 전용 보너스가 적용된다.
+  castingSkill = false;
+  echoActive = false; // 메아리로 재발동 중 (피해 50%)
 
   onStateChange?: () => void;
   onSoulsEarned?: (souls: number) => void;
@@ -1202,6 +1354,10 @@ export class Game {
       fireOnHit: 0,
       projectileOnHit: false,
       spirit: 0,
+      skillDmgAdd: 0,
+      skillCdAdd: 0,
+      skillLifesteal: 0,
+      skillEcho: false,
       moveAdd: 0,
       dashCdAdd: 0,
       airDmgAdd: 0,
@@ -1457,8 +1613,10 @@ export class Game {
       if (p.skillCd[i] > 0) return;
       const s = SKILLS[this.skillLoadout[i]];
       if (!s) return;
-      s.cast(this);
-      p.skillCd[i] = s.cooldown;
+      this.castSkill(s);
+      // 쿨다운 감소 (하한 30%)
+      const cdMul = Math.max(0.3, 1 - this.stats.skillCdAdd);
+      p.skillCd[i] = s.cooldown * cdMul;
     });
     p.skillCd = p.skillCd.map((c) => Math.max(0, c - dt)) as [number, number, number];
 
@@ -1505,6 +1663,13 @@ export class Game {
         if (overlap(hb, { x: e.x - e.w / 2, y: e.y - e.h, w: e.w, h: e.h })) {
           this.damageEnemy(e, hb.dmg * pdMul, hb.knockback ?? 0, p.facing);
           hb.hits.add(e.id);
+          // 스킬 흡혈: 스킬 히트박스가 적중할 때마다 회복
+          if (hb.isSkill && this.stats.skillLifesteal > 0) {
+            this.player.hp = Math.min(
+              this.stats.maxHp,
+              this.player.hp + this.stats.skillLifesteal
+            );
+          }
           // 불사조 깃털: 타격 시 화상 추가 피해 (즉시 적용하는 간이 DoT)
           if (this.stats.fireOnHit > 0 && !e.dead) {
             this.damageEnemy(e, this.stats.fireOnHit, 0, p.facing);
@@ -2268,6 +2433,25 @@ export class Game {
   }
 
   // 지정 좌표에서 가장 가까운 살아있는 적 (range 밖이면 null)
+  // 스킬 발동. castingSkill 플래그를 세워 생성되는 히트박스/투사체가
+  // 스킬 판정을 받게 하고, '메아리' 유물이 있으면 짧은 뒤 한 번 더 터뜨린다.
+  private castSkill(s: SkillDef, isEcho = false) {
+    this.castingSkill = true;
+    this.echoActive = isEcho;
+    try {
+      s.cast(this);
+    } finally {
+      this.castingSkill = false;
+      this.echoActive = false;
+    }
+    if (this.stats.skillEcho && !isEcho) {
+      setTimeout(() => {
+        if (this.destroyed || this.phase !== "playing") return;
+        this.castSkill(s, true);
+      }, 400);
+    }
+  }
+
   private nearestEnemyTo(x: number, y: number, range: number): Enemy | null {
     let best: Enemy | null = null;
     let bestD = range;
@@ -2496,7 +2680,10 @@ export class Game {
     this.hazards = [];
     this.camera.x = 0;
     // 전직 제단 층이면 선택 화면을 먼저 띄운다 (아직 방랑자일 때만)
-    if (CLASS_ALTAR_FLOORS.includes(this.floor) && this.playerClass === "wanderer") {
+    // 전직 제단
+    // - 6층: 아직 방랑자면 1차 전직 (건너뛰기 가능)
+    // - 26층: 1차를 건너뛰어 여전히 방랑자인 경우에만 열림 → 상위 직업
+    if (this.playerClass === "wanderer" && CLASS_ALTAR_FLOORS.includes(this.floor)) {
       this.phase = "class_select";
     } else {
       this.phase = "playing";
@@ -2505,8 +2692,23 @@ export class Game {
   }
 
   // 전직 선택. class_select 화면에서 호출.
+  // 현재 제단에서 선택 가능한 직업 목록
+  availableClasses(): ClassId[] {
+    if (this.floor >= CLASS_ALTAR_2) return ["warlord", "templar", "reaper"];
+    return ["berserker", "guardian", "assassin"];
+  }
+
+  // 전직 제단을 그냥 지나친다. 나중에 더 강한 제단이 기다린다.
+  skipClassAltar() {
+    if (this.phase !== "class_select") return;
+    this.phase = "playing";
+    this.emit();
+  }
+
   chooseClass(id: ClassId) {
     if (this.phase !== "class_select") return;
+    // 해당 제단에서 고를 수 없는 직업이면 무시 (UI 우회 방지)
+    if (!this.availableClasses().includes(id)) return;
     this.playerClass = id;
     // 스탯을 처음부터 다시 계산해 직업 보정을 적용 (HP 비율 보존)
     const hpRatio = this.player.hp / this.stats.maxHp;
@@ -2529,6 +2731,10 @@ export class Game {
       fireOnHit: 0,
       projectileOnHit: false,
       spirit: 0,
+      skillDmgAdd: 0,
+      skillCdAdd: 0,
+      skillLifesteal: 0,
+      skillEcho: false,
       moveAdd: 0,
       dashCdAdd: 0,
       airDmgAdd: 0,
@@ -2716,11 +2922,29 @@ export class Game {
       const eset = setName ? loadSpriteSet(setName) : null;
 
       if (eset && eset.loaded) {
-        // 걷기/비행 애니메이션. flyer는 항상 날갯짓, 그 외는 지상 이동 시.
-        const animating =
-          e.type === "flyer" || (Math.abs(e.vx) > 15 && e.onGround);
-        const frame = animating ? Math.floor(e.ai * 6) % 4 : 0;
-        const img = eset.frames[frame];
+        // 상태에 맞는 프레임 선택 (걷기 순환 / 준비 / 발동)
+        const fm =
+          e.type === "boss"
+            ? e.bossKind
+              ? BOSS_FRAMES[e.bossKind]
+              : undefined
+            : ENEMY_FRAMES[e.type];
+        let frame = 0;
+        if (fm) {
+          if (e.state === 1 && fm.ready !== undefined) {
+            frame = fm.ready; // 공격 예비 동작
+          } else if (e.state === 2 && fm.act !== undefined) {
+            frame = fm.act; // 공격 발동
+          } else {
+            // 이동 중이면 걷기 프레임 순환, 정지면 첫 프레임
+            const moving =
+              e.type === "flyer" || (Math.abs(e.vx) > 15 && e.onGround);
+            frame = moving
+              ? fm.walk[Math.floor(e.ai * 6) % fm.walk.length]
+              : fm.walk[0];
+          }
+        }
+        const img = eset.frames[frame] ?? eset.frames[0];
         // 보스는 크게, 일반은 히트박스 높이에 맞춰
         const targetH = e.h * (e.type === "boss" ? 1.7 : 1.85);
         const scale = targetH / img.height;
@@ -2923,10 +3147,36 @@ const BOSS_SPRITE: Record<BossKind, string> = {
 // 넣고/빼면 된다.
 const SPRITE_FACES_LEFT = new Set<string>([
   "berserker",
-  "grunt",
-  "shielder",
-  "flyer",
+  // 아래는 실제 받은 시트가 왼쪽을 보고 있어 뒤집기 기준을 반대로 잡는다.
+  "stormknight",
 ]);
+
+// 몹별 프레임 용도 매핑.
+// 받은 스프라이트 시트는 대체로 [0]=대기, [1~2]=걷기/준비, [3]=공격/특수 구성이라
+// 4프레임을 그냥 순환시키면 걷는 중에 공격 포즈가 섞인다. 그래서 상태별로
+// 쓸 프레임을 따로 지정한다.
+//   walk  : 이동 중 순환할 프레임 목록
+//   ready : 공격 준비(텔레그래프) 상태에서 쓸 프레임
+//   act   : 공격 발동 순간에 쓸 프레임
+type FrameMap = { walk: number[]; ready?: number; act?: number };
+const ENEMY_FRAMES: Partial<Record<Enemy["type"], FrameMap>> = {
+  grunt: { walk: [0, 1, 2, 3] }, // 4프레임 모두 걷기 사이클
+  shielder: { walk: [0, 1, 2, 3], ready: 2, act: 3 },
+  charger: { walk: [0, 1], ready: 2, act: 3 }, // 3=돌진 자세
+  archer: { walk: [0, 1], ready: 1, act: 2 }, // 2=활 당김, 3=발사 직후
+  bomber: { walk: [0, 1, 2], ready: 3, act: 3 }, // 3=점화/자폭
+  flyer: { walk: [0, 1, 2], ready: 2, act: 3 }, // 3=급강하
+  mage: { walk: [0, 1], ready: 1, act: 2 }, // 2=시전
+  brute: { walk: [0, 1], ready: 2, act: 3 }, // 2=치켜듦, 3=내려침
+};
+
+// 보스는 [0]=대기, [1~2]=이동/공격, [3]=필살기 구성
+const BOSS_FRAMES: Record<BossKind, FrameMap> = {
+  warden: { walk: [0, 1, 2], ready: 2, act: 3 },
+  plaguelord: { walk: [0, 1], ready: 1, act: 2 },
+  stormknight: { walk: [0, 1, 2], ready: 2, act: 3 },
+  infernal: { walk: [0, 1, 2], ready: 2, act: 3 },
+};
 
 type SpriteSet = { frames: HTMLImageElement[]; loaded: boolean };
 const spriteCache: Record<string, SpriteSet> = {};
