@@ -459,7 +459,7 @@ function EndOverlay({
 function ControlsHint() {
   return (
     <div className="pointer-events-none absolute bottom-2 left-2 font-mono-tight text-[10px] tracking-widest text-muted-foreground opacity-70">
-      A/D 이동 · SPACE 점프(2단) · SHIFT 대시 · J 공격 · K/L 스킬 · I 궁극기 · E 문
+      WASD/방향키 이동 · SHIFT 대시 · J 공격 · K/L 스킬 · I 궁극기 · E 문
     </div>
   );
 }
@@ -555,7 +555,7 @@ function Lobby({
         <section className="mt-auto pt-10">
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-6">
             <div className="max-w-md text-xs text-muted-foreground">
-              조작: <span className="font-mono-tight">A/D · SPACE · SHIFT · J · K · L · I · E</span>
+              조작: <span className="font-mono-tight">WASD · SHIFT · J · K · L · I · E</span>
               <div className="mt-1">1층에는 3개의 방과 보스가 존재한다.</div>
             </div>
             <div className="flex gap-3">
