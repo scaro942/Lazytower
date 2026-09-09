@@ -892,6 +892,19 @@ export type Projectile = {
   fromEnemy: boolean;
   homing?: number; // 초당 방향 보정 강도 (마법사 탄, 정령 탄)
   spirit?: boolean; // 정령이 쏜 탄 (아군이며 적을 추적)
+  pierce?: number; // 관통 가능한 적 수 (플레이어 탄). 초과하면 소멸
+  hitIds?: Set<number>; // 이미 맞춘 적 (관통 중복타 방지)
+  color?: string; // 렌더 색상 지정
+};
+
+// 경험치 젬 (적 처치 시 드롭 → 획득 범위 안이면 플레이어에게 빨려온다)
+export type Gem = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  xp: number;
+  pulled: boolean;
 };
 
 // 바닥 장판(경고 후 발동하는 위험지대)
@@ -945,6 +958,23 @@ export type Stats = {
   dashCdAdd: number; // 대시 쿨 감소 가산 비율
   airDmgAdd: number; // 공중 피해 가산 비율
   finisherAdd: number; // 마무리 피해 가산 비율
+  // ── 뱀서류(생존) 무기/패시브 ──
+  weaponMight: number; // 무기 피해 배수 (1 = 기본)
+  weaponHaste: number; // 무기 쿨다운 감소 비율 (0~0.7)
+  projAdd: number; // 추가 투사체 수
+  areaMul: number; // 범위/투사체 크기 배수 (1 = 기본)
+  pickup: number; // 젬 획득 반경(px)
+  regen: number; // 초당 HP 재생
+};
+
+// 뱀서류 무기/패시브 기본 스탯
+export const DEFAULT_SURV_STATS = {
+  weaponMight: 1,
+  weaponHaste: 0,
+  projAdd: 0,
+  areaMul: 1,
+  pickup: 120,
+  regen: 0,
 };
 
 export type Phase =
@@ -953,7 +983,8 @@ export type Phase =
   | "class_select"
   | "dead"
   | "victory"
-  | "cleared_floor";
+  | "cleared_floor"
+  | "levelup";
 
 export type RewardChoice =
   | { kind: "relic"; relic: Relic }
@@ -1286,6 +1317,189 @@ function generateRoom(
   };
 }
 
+// 뱀서류 생존 아레나 (넓은 단일 필드)
+export const SURV_W = 2800;
+export const SURV_H = 2000;
+function makeSurvivalArena(): Room {
+  return {
+    w: SURV_W,
+    h: SURV_H,
+    platforms: [],
+    enemies: [],
+    doorOpen: false,
+    cleared: false,
+    isBoss: false,
+    index: 0,
+    doorX: SURV_W / 2,
+    doorY: SURV_H / 2,
+  };
+}
+
+// ─── 무기 (자동 공격) ────────────────────────────────────────────────
+export type WeaponId = "dagger" | "nova" | "arrow" | "orbit";
+export type Weapon = { id: WeaponId; level: number; cd: number };
+export type WeaponDef = {
+  id: WeaponId;
+  name: string;
+  desc: string;
+  maxLevel: number;
+  baseCd: number; // 기본 발동 주기(초)
+  levelText: (lvl: number) => string;
+  fire: (g: Game, w: Weapon) => void;
+};
+
+export const MAX_WEAPONS = 6;
+
+// 무기 피해 = (기본 + 공격력 계수) × 무기 위력
+function wdmg(g: Game, base: number, atkK: number) {
+  return (base + (g.stats.atk + g.buffAtk) * atkK) * g.stats.weaponMight;
+}
+
+export const WEAPONS: Record<WeaponId, WeaponDef> = {
+  dagger: {
+    id: "dagger",
+    name: "연속 단검",
+    desc: "가장 가까운 적에게 단검을 자동 투척",
+    maxLevel: 8,
+    baseCd: 1.0,
+    levelText: (l) => `단검 ${1 + Math.floor(l / 2)}개 · 관통 ${l >= 5 ? 1 : 0}`,
+    fire: (g, w) => {
+      const count = 1 + Math.floor(w.level / 2) + g.stats.projAdd;
+      const dmg = wdmg(g, 9, 0.6);
+      const size = 14 * g.stats.areaMul;
+      const pierce = w.level >= 5 ? 1 : 0;
+      const base = g.aimAngleToNearest();
+      for (let i = 0; i < count; i++) {
+        const ang = base + (i - (count - 1) / 2) * 0.14;
+        g.projectiles.push({
+          x: g.player.x,
+          y: g.player.y - 22,
+          vx: Math.cos(ang) * 560,
+          vy: Math.sin(ang) * 560,
+          w: size,
+          h: size * 0.5,
+          life: 1.2,
+          dmg,
+          fromEnemy: false,
+          pierce,
+          hitIds: new Set(),
+          color: "#f5f5f5",
+        });
+      }
+    },
+  },
+  nova: {
+    id: "nova",
+    name: "회전 참격",
+    desc: "주변을 휩쓰는 광역 베기",
+    maxLevel: 8,
+    baseCd: 1.7,
+    levelText: (l) => `반경 ${Math.round((70 + l * 14))}px`,
+    fire: (g, w) => {
+      const r = (70 + w.level * 14) * g.stats.areaMul;
+      const dmg = wdmg(g, 11, 0.5);
+      const p = g.player;
+      spawnHitbox(g, {
+        x: p.x - r,
+        y: p.y - 22 - r,
+        w: r * 2,
+        h: r * 2,
+        dmg,
+        life: 0.16,
+        knockback: 200,
+      });
+      g.effects.push({ x: p.x, y: p.y - 22, r: r * 0.3, maxR: r, life: 0.35, color: "#dfe7ff" });
+      g.shake = Math.max(g.shake, 4);
+    },
+  },
+  arrow: {
+    id: "arrow",
+    name: "마법 화살",
+    desc: "적을 꿰뚫는 관통 화살",
+    maxLevel: 8,
+    baseCd: 1.5,
+    levelText: (l) => `${1 + Math.floor((l - 1) / 2)}발 · 관통 ${1 + l}`,
+    fire: (g, w) => {
+      const count = 1 + Math.floor((w.level - 1) / 2) + g.stats.projAdd;
+      const dmg = wdmg(g, 7, 0.5);
+      const size = 16 * g.stats.areaMul;
+      const base = g.aimAngleToNearest();
+      for (let i = 0; i < count; i++) {
+        const ang = base + (i - (count - 1) / 2) * 0.1;
+        g.projectiles.push({
+          x: g.player.x,
+          y: g.player.y - 22,
+          vx: Math.cos(ang) * 470,
+          vy: Math.sin(ang) * 470,
+          w: size,
+          h: size * 0.5,
+          life: 1.6,
+          dmg,
+          fromEnemy: false,
+          pierce: 1 + w.level,
+          hitIds: new Set(),
+          color: "#8fe3ff",
+        });
+      }
+    },
+  },
+  orbit: {
+    id: "orbit",
+    name: "수호 궤도",
+    desc: "몸 주위를 도는 빛 구슬이 적을 친다",
+    maxLevel: 8,
+    baseCd: 0.13, // 자주 발동하며 궤도 위치에 판정을 뿌린다
+    levelText: (l) => `구슬 ${1 + l}개`,
+    fire: (g, w) => {
+      const n = 1 + w.level;
+      const r = (58 + w.level * 8) * g.stats.areaMul;
+      const dmg = wdmg(g, 5, 0.3) * 0.5;
+      const p = g.player;
+      for (let i = 0; i < n; i++) {
+        const ang = g.animClock * 2.2 + (i / n) * Math.PI * 2;
+        const ox = p.x + Math.cos(ang) * r;
+        const oy = p.y - 22 + Math.sin(ang) * r;
+        spawnHitbox(g, {
+          x: ox - 12,
+          y: oy - 12,
+          w: 24,
+          h: 24,
+          dmg,
+          life: 0.14,
+          knockback: 40,
+        });
+      }
+    },
+  },
+};
+
+// ─── 패시브 (레벨업 강화) ────────────────────────────────────────────
+export type Passive = {
+  id: string;
+  name: string;
+  desc: string;
+  apply: (g: Game) => void;
+};
+
+export const PASSIVES: Passive[] = [
+  { id: "might", name: "예리함", desc: "무기 피해 +18%", apply: (g) => (g.stats.weaponMight += 0.18) },
+  { id: "haste", name: "속사", desc: "공격 속도 +12%", apply: (g) => (g.stats.weaponHaste = Math.min(0.7, g.stats.weaponHaste + 0.12)) },
+  { id: "area", name: "확장", desc: "공격 범위 +15%", apply: (g) => (g.stats.areaMul += 0.15) },
+  { id: "proj", name: "다중 발사", desc: "투사체 +1", apply: (g) => (g.stats.projAdd += 1) },
+  { id: "swift", name: "날렵함", desc: "이동속도 +12%", apply: (g) => (g.stats.moveAdd += 0.12) },
+  { id: "vigor", name: "활력", desc: "최대 HP +30, 30 회복", apply: (g) => { g.stats.maxHp += 30; g.player.hp = Math.min(g.stats.maxHp, g.player.hp + 30); } },
+  { id: "regen", name: "재생", desc: "초당 HP +1 회복", apply: (g) => (g.stats.regen += 1) },
+  { id: "magnet", name: "자력", desc: "젬 획득 범위 +40%", apply: (g) => (g.stats.pickup *= 1.4) },
+  { id: "guard", name: "방벽", desc: "받는 피해 -8%", apply: (g) => (g.stats.dmgTakenMul *= 0.92) },
+  { id: "dash", name: "질주", desc: "대시 쿨 -15%", apply: (g) => (g.stats.dashCdAdd += 0.15) },
+];
+
+export type UpgradeChoice =
+  | { kind: "weapon_new"; id: WeaponId }
+  | { kind: "weapon_up"; id: WeaponId; level: number }
+  | { kind: "passive"; passive: Passive }
+  | { kind: "heal" };
+
 // ─── Game ──────────────────────────────────────────────────────────
 export class Game {
   canvas: HTMLCanvasElement;
@@ -1304,9 +1518,23 @@ export class Game {
   hazards: Hazard[] = [];
   particles: { x: number; y: number; vx: number; vy: number; life: number; color: string }[] = [];
   hitNumbers: { x: number; y: number; text: string; life: number; color: string }[] = [];
+  // 확산 링 등 연출 이펙트 (무기 시전 등)
+  effects: { x: number; y: number; r: number; maxR: number; life: number; color: string }[] = [];
   camera = { x: 0, y: 0 };
   shake = 0;
   groundY = 520;
+
+  // ── 뱀서류(생존) 상태 ──
+  time = 0; // 생존 경과 시간(초)
+  weapons: Weapon[] = [];
+  gems: Gem[] = [];
+  level = 1;
+  xp = 0;
+  xpNext = 5;
+  kills = 0;
+  private spawnAccum = 0;
+  private bossTimer = 90; // 첫 보스 난입까지 시간
+  upgradeChoices: UpgradeChoice[] = [];
 
   phase: Phase = "playing";
   rewardChoices: RewardChoice[] = [];
@@ -1385,6 +1613,7 @@ export class Game {
       dashCdAdd: 0,
       airDmgAdd: 0,
       finisherAdd: 0,
+      ...DEFAULT_SURV_STATS,
     };
     // 새 런은 방랑자로 시작
     this.playerClass = "wanderer";
@@ -1432,8 +1661,26 @@ export class Game {
     this.hazards = [];
     this.particles = [];
     this.hitNumbers = [];
-    this.room = generateRoom(this.floor, 0, false, this.groundY);
-    this.spawnPlayerAtStart();
+    this.effects = [];
+    this.gems = [];
+    // 생존 상태 초기화
+    this.time = 0;
+    this.level = 1;
+    this.xp = 0;
+    this.xpNext = 5;
+    this.kills = 0;
+    this.spawnAccum = 0;
+    this.bossTimer = 90;
+    // 시작 무기 1개 (연속 단검)
+    this.weapons = [{ id: "dagger", level: 1, cd: WEAPONS.dagger.baseCd }];
+    // 넓은 생존 아레나 중앙에서 시작
+    this.room = makeSurvivalArena();
+    this.player.x = this.room.w / 2;
+    this.player.y = this.room.h / 2;
+    const canvasW = this.canvas.width / devicePixelRatioSafe();
+    const canvasH = this.canvas.height / devicePixelRatioSafe();
+    this.camera.x = this.clampCamX(this.player.x - canvasW / 2, canvasW);
+    this.camera.y = this.clampCamY(this.player.y - canvasH / 2, canvasH);
     this.phase = "playing";
     this.emit();
   }
@@ -1509,9 +1756,9 @@ export class Game {
     const p = this.player;
     const k = this.keys;
 
-    // floor rule
-    const rule = FLOOR_RULES[this.floor];
-    if (rule) rule.apply(this, dt);
+    // 생존 시간 경과 → 난이도 티어(=floor)를 시간으로부터 도출 (60초마다 +1)
+    this.time += dt;
+    this.floor = Math.min(MAX_FLOOR, 1 + Math.floor(this.time / 60));
 
     // 직업 버프 타이머
     if (this.buffAtkTimer > 0) {
@@ -1520,65 +1767,43 @@ export class Game {
     }
     if (this.killHasteTimer > 0) this.killHasteTimer -= dt;
 
-    // 수호 정령: 주기마다 가장 가까운 적을 자동 공격
-    if (this.stats.spirit > 0) {
-      this.spiritCd -= dt;
-      if (this.spiritCd <= 0) {
-        const target = this.nearestEnemy(560);
-        if (target) {
-          // 스택마다 주기 2초 단축 (1스택 10초 → 5스택 2초), 최소 2초
-          const interval = Math.max(2, 10 - (this.stats.spirit - 1) * 2);
-          this.spiritCd = interval;
-          const sx = p.x;
-          const sy = p.y - p.h - 16; // 플레이어 머리 위에서 발사
-          const ang = Math.atan2(target.y - target.h / 2 - sy, target.x - sx);
-          this.projectiles.push({
-            x: sx,
-            y: sy,
-            vx: Math.cos(ang) * 420,
-            vy: Math.sin(ang) * 420,
-            w: 12,
-            h: 12,
-            life: 2,
-            dmg: 20 + this.stats.atk * 1.2,
-            fromEnemy: false,
-            homing: 3.5, // 정령 탄은 적을 따라간다
-            spirit: true,
-          });
-          for (let i = 0; i < 6; i++) {
-            this.particles.push({
-              x: sx,
-              y: sy,
-              vx: (Math.random() - 0.5) * 100,
-              vy: -40 - Math.random() * 60,
-              life: 0.4,
-              color: "#8fe3ff",
-            });
-          }
-        }
+    // HP 재생
+    if (this.stats.regen > 0 && p.hp > 0) {
+      p.hp = Math.min(this.stats.maxHp, p.hp + this.stats.regen * dt);
+    }
+
+    // 자동 무기 발동
+    const hasteMul = Math.max(0.3, 1 - this.stats.weaponHaste) * (this.killHasteTimer > 0 ? 0.7 : 1);
+    for (const w of this.weapons) {
+      w.cd -= dt;
+      if (w.cd <= 0) {
+        const def = WEAPONS[w.id];
+        def.fire(this, w);
+        w.cd = def.baseCd * hasteMul;
       }
     }
 
-    // input edges
-    const attackPress = !!k["KeyJ"];
-    const attackEdge = attackPress && !this.lastAttackPress;
-    this.lastAttackPress = attackPress;
+    // 적 지속 스폰 (화면 밖 링에서). 시간이 갈수록 간격이 짧아진다.
+    this.updateSpawning(dt);
 
+    // 보스 난입
+    this.bossTimer -= dt;
+    if (this.bossTimer <= 0) {
+      this.spawnBoss();
+      this.bossTimer = 120; // 2분마다
+    }
+
+    // 이펙트(확산 링) 갱신
+    for (const fx of this.effects) {
+      fx.r += (fx.maxR - fx.r) * Math.min(1, dt * 12);
+      fx.life -= dt;
+    }
+    this.effects = this.effects.filter((f) => f.life > 0);
+
+    // input edges — 생존 모드는 이동/대시만 조작 (공격은 전부 자동)
     const dashPress = !!(k["ShiftLeft"] || k["ShiftRight"]);
     const dashEdge = dashPress && !this.lastDashPress;
     this.lastDashPress = dashPress;
-
-    const skillKeys: ("KeyK" | "KeyL" | "KeyI")[] = ["KeyK", "KeyL", "KeyI"];
-    const skillEdges = skillKeys.map((sk, i) => {
-      const cur = !!k[sk];
-      const edge = cur && !this.lastSkillPress[i];
-      this.lastSkillPress[i] = cur;
-      return edge;
-    });
-
-    const interactPress = !!(k["KeyE"] || k["Space"]);
-    const interactEdge = interactPress && !this.lastInteractPress;
-    this.lastInteractPress = interactPress;
 
     // 8-way directional input (탑다운)
     const leftHeld = !!(k["KeyA"] || k["ArrowLeft"]);
@@ -1653,56 +1878,8 @@ export class Game {
       p.dashCd =
         DASH_CD *
         Math.max(0.25, this.stats.dashCdMul - this.stats.dashCdAdd);
-      p.attackTimer = 0;
-      p.comboIdx = 0;
     }
     p.dashCd = Math.max(0, p.dashCd - dt);
-
-    // attack — 3-hit combo, 조준 방향으로 베기
-    if (attackEdge && p.attackTimer <= 0 && p.dashTime <= 0) {
-      const idx = p.comboTimer > 0 ? Math.min(2, p.comboIdx) : 0;
-      p.comboIdx = idx + 1;
-      const hasteMul = this.killHasteTimer > 0 ? 0.6 : 1; // 처치 버프 시 연타 가속
-      p.attackTimer = (idx === 2 ? 0.32 : 0.22) * hasteMul;
-      p.comboTimer = COMBO_WINDOW;
-      const isFinisher = idx === 2;
-      const effAtk = this.stats.atk + this.buffAtk;
-      let dmg = 7 + effAtk * 0.9;
-      if (isFinisher) dmg *= this.stats.finisherMul + this.stats.finisherAdd;
-      if (this.stats.berserker > 0 && p.hp < this.stats.maxHp * 0.5)
-        dmg *= 1 + 0.25 * this.stats.berserker;
-      const range = isFinisher ? 76 : 60;
-      const cx = p.x + p.aimx * (range * 0.5 + 8);
-      const cy = p.y - 22 + p.aimy * (range * 0.5 + 8);
-      spawnHitbox(this, {
-        x: cx - range / 2,
-        y: cy - range / 2,
-        w: range,
-        h: range,
-        dmg,
-        life: 0.12,
-        follow: false,
-        knockback: isFinisher ? 340 : 140,
-      });
-    }
-
-    // skills
-    skillEdges.forEach((edge, i) => {
-      if (!edge) return;
-      if (p.skillCd[i] > 0) return;
-      const s = SKILLS[this.skillLoadout[i]];
-      if (!s) return;
-      this.castSkill(s);
-      // 쿨다운 감소 (하한 30%)
-      const cdMul = Math.max(0.3, 1 - this.stats.skillCdAdd);
-      p.skillCd[i] = s.cooldown * cdMul;
-    });
-    p.skillCd = p.skillCd.map((c) => Math.max(0, c - dt)) as [number, number, number];
-
-    // combo timer
-    p.comboTimer = Math.max(0, p.comboTimer - dt);
-    if (p.attackTimer > 0) p.attackTimer -= dt;
-    if (p.comboTimer <= 0 && p.attackTimer <= 0) p.comboIdx = 0;
 
     // move + collide (탑다운: 중력 없음)
     this.movePlayer(dt);
@@ -1728,6 +1905,17 @@ export class Game {
         continue;
       }
       this.updateEnemy(e, dt);
+    }
+    // 접촉 피해: 적과 몸이 겹치면 피해 (무적시간이 연타를 막는다)
+    if (p.iframes <= 0) {
+      const pbox = { x: p.x - p.w / 2, y: p.y - p.h, w: p.w, h: p.h };
+      for (const e of this.room.enemies) {
+        if (e.dead) continue;
+        if (overlap({ x: e.x - e.w / 2, y: e.y - e.h, w: e.w, h: e.h }, pbox)) {
+          this.damagePlayer(Math.max(4, e.dmg * 0.5));
+          break;
+        }
+      }
     }
     // apply hitboxes vs enemies (player hitboxes)
     const pdMul = FLOOR_RULES[this.floor]?.playerDmgMul ?? 1;
@@ -1833,13 +2021,18 @@ export class Game {
           pr.life = 0;
         }
       } else {
-        // 플레이어 투사체 → 적
+        // 플레이어 투사체 → 적 (관통 지원)
         for (const e of this.room.enemies) {
           if (e.dead) continue;
+          if (pr.hitIds && pr.hitIds.has(e.id)) continue;
           if (overlap(pr, { x: e.x - e.w / 2, y: e.y - e.h, w: e.w, h: e.h })) {
             this.damageEnemy(e, pr.dmg, 60, Math.sign(pr.vx) || p.facing);
-            pr.life = 0;
-            break;
+            if (pr.hitIds) pr.hitIds.add(e.id);
+            const pierce = pr.pierce ?? 0;
+            if ((pr.hitIds?.size ?? 1) > pierce) {
+              pr.life = 0;
+              break;
+            }
           }
         }
       }
@@ -1881,11 +2074,9 @@ export class Game {
 
     // clear dead
     this.room.enemies = this.room.enemies.filter((e) => !(e.dead && e.dying <= 0));
-    if (!this.room.cleared && this.room.enemies.length === 0) {
-      this.room.cleared = true;
-      this.room.doorOpen = true;
-      this.emit();
-    }
+
+    // 경험치 젬: 획득 범위 안이면 빨려오고, 닿으면 흡수
+    this.updateGems(dt);
 
     // camera — 플레이어를 양축 중앙에 두고 아레나 밖은 잘라낸다
     const canvasW = this.canvas.width / devicePixelRatioSafe();
@@ -1902,14 +2093,46 @@ export class Game {
       this.bankSouls();
       this.emit();
     }
+  }
 
-    // interact — 문 근처에서 진입
-    if (interactEdge && this.room.doorOpen) {
-      if (Math.hypot(p.x - this.room.doorX, p.y - this.room.doorY) < 70) {
-        if (this.room.isBoss) this.ackFloorClear();
-        else this.nextRoom();
+  // 경험치 젬 갱신
+  private updateGems(dt: number) {
+    const p = this.player;
+    const pull = this.stats.pickup;
+    const remaining: Gem[] = [];
+    for (const g of this.gems) {
+      const dx = p.x - g.x;
+      const dy = p.y - 22 - g.y;
+      const d = Math.hypot(dx, dy);
+      if (g.pulled || d < pull) {
+        g.pulled = true;
+        const sp = 420;
+        g.x += (dx / (d || 1)) * sp * dt;
+        g.y += (dy / (d || 1)) * sp * dt;
+      }
+      if (d < 26) {
+        this.gainXp(g.xp);
+      } else {
+        remaining.push(g);
       }
     }
+    this.gems = remaining;
+  }
+
+  private gainXp(amount: number) {
+    this.xp += amount;
+    let leveled = false;
+    while (this.xp >= this.xpNext) {
+      this.xp -= this.xpNext;
+      this.level++;
+      this.xpNext = Math.round(this.xpNext * 1.28 + 4);
+      leveled = true;
+    }
+    if (leveled && this.phase === "playing") {
+      this.buildUpgrades();
+      this.phase = "levelup";
+    }
+    this.emit();
   }
 
   private movePlayer(dt: number) {
@@ -2588,6 +2811,123 @@ export class Game {
     return this.nearestEnemyTo(this.player.x, this.player.y - this.player.h / 2, range);
   }
 
+  // 무기가 조준할 각도 (가장 가까운 적, 없으면 마지막 이동/조준 방향)
+  aimAngleToNearest(): number {
+    const t = this.nearestEnemy(900);
+    if (t) return Math.atan2(t.y - t.h / 2 - (this.player.y - 22), t.x - this.player.x);
+    return Math.atan2(this.player.aimy, this.player.aimx);
+  }
+
+  // ─── 생존: 적 스폰 ───────────────────────────────────────────────
+  private updateSpawning(dt: number) {
+    // 시간이 갈수록 스폰 간격 단축(1.4초 → 0.25초), 최대 동시 생존 수 상한
+    const interval = Math.max(0.25, 1.4 - this.time * 0.012);
+    const cap = Math.min(220, 40 + Math.floor(this.time / 4));
+    const alive = this.room.enemies.filter((e) => !e.dead).length;
+    this.spawnAccum += dt;
+    while (this.spawnAccum >= interval) {
+      this.spawnAccum -= interval;
+      if (alive + 1 < cap) {
+        // 30초마다 큰 무리 러시
+        const burst = Math.floor(this.time) % 30 < 1 ? 4 : 1;
+        for (let i = 0; i < burst; i++) this.spawnOne();
+      }
+    }
+  }
+
+  // 화면(카메라) 밖 링에서 적 1마리 스폰
+  private spawnOne(type?: Enemy["type"]) {
+    const canvasW = this.canvas.width / devicePixelRatioSafe();
+    const canvasH = this.canvas.height / devicePixelRatioSafe();
+    const ringR = Math.hypot(canvasW, canvasH) / 2 + 60;
+    const ang = Math.random() * Math.PI * 2;
+    let ex = this.player.x + Math.cos(ang) * ringR;
+    let ey = this.player.y + Math.sin(ang) * ringR;
+    ex = Math.max(ARENA_MARGIN, Math.min(this.room.w - ARENA_MARGIN, ex));
+    ey = Math.max(ARENA_MARGIN, Math.min(this.room.h - ARENA_MARGIN, ey));
+    const t = type ?? pickEnemyType(this.floor);
+    const e = makeEnemy(t, ex, ey);
+    e.hp = e.maxHp = Math.round(e.maxHp * (1 + (this.floor - 1) * 0.18));
+    e.dmg = Math.round(e.dmg * (1 + (this.floor - 1) * 0.06));
+    this.room.enemies.push(e);
+  }
+
+  private spawnBoss() {
+    const canvasW = this.canvas.width / devicePixelRatioSafe();
+    const canvasH = this.canvas.height / devicePixelRatioSafe();
+    const ringR = Math.hypot(canvasW, canvasH) / 2 + 80;
+    const ang = Math.random() * Math.PI * 2;
+    let ex = this.player.x + Math.cos(ang) * ringR;
+    let ey = this.player.y + Math.sin(ang) * ringR;
+    ex = Math.max(ARENA_MARGIN, Math.min(this.room.w - ARENA_MARGIN, ex));
+    ey = Math.max(ARENA_MARGIN, Math.min(this.room.h - ARENA_MARGIN, ey));
+    const boss = makeEnemy("boss", ex, ey);
+    boss.bossKind = bossKindForFloor(this.floor);
+    boss.hp = boss.maxHp = Math.round(240 * (1 + (this.floor - 1) * 0.25));
+    boss.dmg = Math.round(20 * (1 + (this.floor - 1) * 0.06));
+    boss.w = 64;
+    boss.h = 92;
+    this.room.enemies.push(boss);
+    this.shake = Math.max(this.shake, 10);
+  }
+
+  // ─── 생존: 레벨업 업그레이드 ─────────────────────────────────────
+  private buildUpgrades() {
+    const pool: UpgradeChoice[] = [];
+    // 보유 무기 레벨업
+    for (const w of this.weapons) {
+      const def = WEAPONS[w.id];
+      if (w.level < def.maxLevel) pool.push({ kind: "weapon_up", id: w.id, level: w.level });
+    }
+    // 새 무기 (슬롯 여유 있을 때)
+    if (this.weapons.length < MAX_WEAPONS) {
+      for (const id of Object.keys(WEAPONS) as WeaponId[]) {
+        if (!this.weapons.some((w) => w.id === id)) pool.push({ kind: "weapon_new", id });
+      }
+    }
+    // 패시브
+    for (const passive of PASSIVES) pool.push({ kind: "passive", passive });
+
+    // 무작위 4개 선택
+    const picks: UpgradeChoice[] = [];
+    const bag = [...pool];
+    while (picks.length < 4 && bag.length > 0) {
+      const i = Math.floor(Math.random() * bag.length);
+      picks.push(bag.splice(i, 1)[0]);
+    }
+    // 후보가 부족하면 회복으로 채운다
+    while (picks.length < 3) picks.push({ kind: "heal" });
+    this.upgradeChoices = picks;
+  }
+
+  chooseUpgrade(idx: number) {
+    if (this.phase !== "levelup") return;
+    const c = this.upgradeChoices[idx];
+    if (!c) return;
+    if (c.kind === "weapon_new") {
+      this.weapons.push({ id: c.id, level: 1, cd: WEAPONS[c.id].baseCd });
+    } else if (c.kind === "weapon_up") {
+      const w = this.weapons.find((x) => x.id === c.id);
+      if (w) w.level++;
+    } else if (c.kind === "passive") {
+      c.passive.apply(this);
+    } else {
+      this.player.hp = Math.min(this.stats.maxHp, this.player.hp + 40);
+    }
+    this.upgradeChoices = [];
+    // 남은 레벨업이 있으면 이어서, 없으면 재개
+    if (this.xp >= this.xpNext) {
+      this.xp -= this.xpNext;
+      this.level++;
+      this.xpNext = Math.round(this.xpNext * 1.28 + 4);
+      this.buildUpgrades();
+      this.phase = "levelup";
+    } else {
+      this.phase = "playing";
+    }
+    this.emit();
+  }
+
   private damageEnemy(e: Enemy, dmg: number, kb: number, facing: number) {
     // 치명타 판정
     let d = dmg;
@@ -2666,6 +3006,7 @@ export class Game {
     if (e.hp <= 0) {
       e.dead = true;
       e.dying = 0.3;
+      this.kills++;
       const reward =
         e.type === "boss"
           ? 30
@@ -2686,6 +3027,9 @@ export class Game {
                         : 3;
       this.earnedSouls += reward;
       this.runSouls += reward;
+      // 경험치 젬 드롭 (강한 적일수록 큰 젬)
+      const xpVal = e.type === "boss" ? 30 : e.type === "brute" ? 5 : 2;
+      this.gems.push({ x: e.x, y: e.y - e.h / 2, vx: 0, vy: 0, xp: xpVal, pulled: false });
       if (this.stats.lifesteal > 0) {
         this.player.hp = Math.min(
           this.stats.maxHp,
@@ -2848,6 +3192,7 @@ export class Game {
       dashCdAdd: 0,
       airDmgAdd: 0,
       finisherAdd: 0,
+      ...DEFAULT_SURV_STATS,
     };
     // 직업 보정을 재적용하고, 이번 런에서 먹은 유물 효과도 다시 적용
     CLASSES[id].apply(this);
@@ -2999,6 +3344,32 @@ export class Game {
     ctx.globalAlpha = 1;
     ctx.textAlign = "left";
 
+    // 경험치 젬 — 청록 마름모
+    for (const gem of this.gems) {
+      const s = gem.xp >= 30 ? 8 : gem.xp >= 5 ? 6 : 4;
+      ctx.save();
+      ctx.translate(gem.x, gem.y);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = gem.xp >= 30 ? "#ffd54a" : "#7fe0d6";
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(-s / 2, -s / 2, s, s);
+      ctx.globalAlpha = 0.35;
+      ctx.fillRect(-s, -s, s * 2, s * 2);
+      ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+
+    // 확산 링 이펙트 (무기 시전 등)
+    for (const fx of this.effects) {
+      ctx.globalAlpha = Math.max(0, Math.min(0.6, fx.life * 1.6));
+      ctx.strokeStyle = fx.color;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(fx.x, fx.y, fx.r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
     // hazards (바닥 장판) — 원형 범위. 경고는 점멸 링, 발동은 채워진 원
     for (const hz of this.hazards) {
       const warning = hz.warn > 0;
@@ -3039,8 +3410,19 @@ export class Game {
         ctx.arc(pr.x, pr.y, pr.w / 2, 0, Math.PI * 2);
         ctx.fill();
       } else if (!pr.fromEnemy) {
-        ctx.fillStyle = "#f5f5f5";
-        ctx.fillRect(pr.x - pr.w / 2, pr.y - pr.h / 2, pr.w, pr.h);
+        // 아군 탄: 진행 방향으로 늘인 빛줄기 + 발광
+        const ang = Math.atan2(pr.vy, pr.vx);
+        const len = Math.max(pr.w, 16);
+        ctx.save();
+        ctx.translate(pr.x, pr.y);
+        ctx.rotate(ang);
+        ctx.globalAlpha = 0.3;
+        ctx.fillStyle = pr.color ?? "#f5f5f5";
+        ctx.fillRect(-len, -pr.h, len * 2, pr.h * 2);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = pr.color ?? "#f5f5f5";
+        ctx.fillRect(-len / 2, -pr.h / 2, len, pr.h);
+        ctx.restore();
       } else if (pr.homing) {
         ctx.fillStyle = theme.edge;
         ctx.beginPath();
@@ -3218,26 +3600,24 @@ export class Game {
     }
     ctx.globalAlpha = 1;
 
-    // 수호 정령 — 스택 수만큼 플레이어 주위를 공전하는 빛 구슬
-    if (this.stats.spirit > 0) {
-      const n = this.stats.spirit;
-      const interval = Math.max(2, 10 - (n - 1) * 2);
-      // 발사 임박(마지막 0.6초)하면 밝아진다
-      const charge = 1 - Math.min(1, this.spiritCd / Math.min(0.6, interval));
+    // 궤도 무기 — 몸 주위를 도는 빛 구슬
+    const orbitW = this.weapons.find((w) => w.id === "orbit");
+    if (orbitW) {
+      const n = 1 + orbitW.level;
+      const r = (58 + orbitW.level * 8) * this.stats.areaMul;
       for (let i = 0; i < n; i++) {
-        const ang = this.animClock * 1.6 + (i / n) * Math.PI * 2;
-        const ox = p.x + Math.cos(ang) * 34;
-        const oy = p.y - p.h * 0.6 + Math.sin(ang) * 14;
-        const r = 3.5 + charge * 2;
-        ctx.globalAlpha = 0.25 + charge * 0.35;
+        const ang = this.animClock * 2.2 + (i / n) * Math.PI * 2;
+        const ox = p.x + Math.cos(ang) * r;
+        const oy = p.y - 22 + Math.sin(ang) * r;
+        ctx.globalAlpha = 0.35;
         ctx.fillStyle = "#8fe3ff";
         ctx.beginPath();
-        ctx.arc(ox, oy, r * 2.2, 0, Math.PI * 2);
+        ctx.arc(ox, oy, 11, 0, Math.PI * 2);
         ctx.fill();
-        ctx.globalAlpha = 0.9;
+        ctx.globalAlpha = 0.95;
         ctx.fillStyle = "#e8fbff";
         ctx.beginPath();
-        ctx.arc(ox, oy, r, 0, Math.PI * 2);
+        ctx.arc(ox, oy, 5, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.globalAlpha = 1;

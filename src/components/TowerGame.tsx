@@ -7,38 +7,34 @@ import {
   upgradePerm,
   PERM_MAX,
   type PermStats,
-  type RewardChoice,
-  SKILLS,
-  FLOOR_RULES,
-  MAX_FLOOR,
+  type UpgradeChoice,
+  WEAPONS,
   themeForFloor,
-  CLASSES,
-  type ClassId,
-  RARITY_LABEL,
-  RARITY_COLOR,
 } from "@/lib/game/tower";
+
+type WeaponView = { id: string; name: string; level: number };
 
 type Snapshot = {
   hp: number;
   maxHp: number;
-  atk: number;
-  floor: number;
-  roomIndex: number;
-  roomsPerFloor: number;
+  level: number;
+  xp: number;
+  xpNext: number;
+  time: number;
+  kills: number;
   souls: number;
-  cleared: boolean;
-  doorOpen: boolean;
-  skillCd: [number, number, number];
+  tier: number;
+  zoneName: string;
   phase: string;
-  rewards: RewardChoice[];
-  ruleName?: string;
-  ruleDesc?: string;
-  zoneName?: string;
-  className?: string;
-  classColor?: string;
-  loadout: [string, string, string];
-  killHaste: boolean;
+  weapons: WeaponView[];
+  upgrades: UpgradeChoice[];
 };
+
+function fmtTime(s: number) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
 
 function useHydrated() {
   const [h, setH] = useState(false);
@@ -54,7 +50,6 @@ export function TowerGame() {
   const [perm, setPerm] = useState<PermStats>(() => loadPerm());
   const [snap, setSnap] = useState<Snapshot | null>(null);
 
-  // canvas sizing
   useEffect(() => {
     if (scene !== "run") return;
     const canvas = canvasRef.current;
@@ -75,30 +70,25 @@ export function TowerGame() {
 
     const g = new Game(canvas, perm);
     gameRef.current = g;
-    const snapshot = (): Snapshot => {
-      const rule = FLOOR_RULES[g.floor];
-      return {
-        hp: Math.max(0, Math.round(g.player.hp)),
-        maxHp: Math.round(g.stats.maxHp),
-        atk: Math.round(g.stats.atk),
-        floor: g.floor,
-        roomIndex: g.roomIndex,
-        roomsPerFloor: g.roomsPerFloor,
-        souls: g.runSouls,
-        cleared: g.room.cleared,
-        doorOpen: g.room.doorOpen,
-        skillCd: [...g.player.skillCd] as [number, number, number],
-        phase: g.phase,
-        rewards: g.rewardChoices,
-        ruleName: rule?.name,
-        ruleDesc: rule?.desc,
-        zoneName: themeForFloor(g.floor).name,
-        className: CLASSES[g.playerClass].name,
-        classColor: CLASSES[g.playerClass].color,
-        loadout: [...g.skillLoadout] as [string, string, string],
-        killHaste: g.killHasteTimer > 0,
-      };
-    };
+    const snapshot = (): Snapshot => ({
+      hp: Math.max(0, Math.round(g.player.hp)),
+      maxHp: Math.round(g.stats.maxHp),
+      level: g.level,
+      xp: g.xp,
+      xpNext: g.xpNext,
+      time: g.time,
+      kills: g.kills,
+      souls: g.runSouls,
+      tier: g.floor,
+      zoneName: themeForFloor(g.floor).name,
+      phase: g.phase,
+      weapons: g.weapons.map((w) => ({
+        id: w.id,
+        name: WEAPONS[w.id].name,
+        level: w.level,
+      })),
+      upgrades: g.upgradeChoices,
+    });
     setSnap(snapshot());
     let raf = 0;
     const tick = () => {
@@ -146,22 +136,16 @@ export function TowerGame() {
       <HUD snap={snap} />
       <div className="relative flex-1 overflow-hidden">
         <canvas ref={canvasRef} className="block h-full w-full bg-background" />
-        {snap?.phase === "reward" && (
-          <RewardOverlay
+        {snap?.phase === "levelup" && (
+          <LevelUpOverlay
             snap={snap}
-            onChoose={(i) => gameRef.current?.chooseReward(i)}
-          />
-        )}
-        {snap?.phase === "class_select" && (
-          <ClassSelectOverlay
-            floor={snap.floor}
-            onChoose={(id) => gameRef.current?.chooseClass(id)}
+            onChoose={(i) => gameRef.current?.chooseUpgrade(i)}
           />
         )}
         {snap?.phase === "dead" && (
           <EndOverlay
             title="사망"
-            subtitle={`획득한 영혼 ${snap.souls}이(가) 로비에 저장되었다.`}
+            subtitle={`${fmtTime(snap.time)} 생존 · 처치 ${snap.kills} · 영혼 ${snap.souls} 획득 (로비 저장됨)`}
             primaryLabel="로비로"
             onPrimary={() => {
               setPerm(loadPerm());
@@ -169,58 +153,6 @@ export function TowerGame() {
             }}
           />
         )}
-        {snap?.phase === "victory" && (
-          <EndOverlay
-            title={`탑 정복 · ${MAX_FLOOR}층`}
-            subtitle={`최상층을 정복했다. 영혼 ${snap.souls} 획득. 당신은 탑의 주인이 되었다.`}
-            primaryLabel="로비로"
-            onPrimary={() => {
-              setPerm(loadPerm());
-              setScene("lobby");
-            }}
-          />
-        )}
-        {snap?.phase === "cleared_floor" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-background/85 backdrop-blur-sm">
-            <div className="flex w-full max-w-md flex-col items-center px-6 text-center">
-              <div className="font-mono-tight text-xs tracking-[0.3em] text-muted-foreground">
-                FLOOR {snap.floor} CLEAR
-              </div>
-              <h2 className="mt-2 text-3xl font-bold tracking-tight">
-                {snap.floor}층 돌파
-              </h2>
-              <p className="mt-3 text-sm text-muted-foreground">
-                영혼 {snap.souls}이(가) 로비에 안전하게 저장되었다.
-                <br />
-                다음은 {snap.floor + 1}층 — 더 강한 적이 기다린다.
-              </p>
-              {themeForFloor(snap.floor + 1).name !==
-                themeForFloor(snap.floor).name && (
-                <div className="mt-3 rounded-sm border border-accent/40 px-3 py-1.5 font-mono-tight text-xs tracking-widest text-accent">
-                  새 구간 진입 · {themeForFloor(snap.floor + 1).name}
-                </div>
-              )}
-              <button
-                onClick={() => gameRef.current?.ackNextFloor()}
-                className="mt-6 rounded-sm border border-border bg-card px-8 py-3 font-mono-tight text-sm tracking-widest text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-              >
-                {snap.floor + 1}층으로 →
-              </button>
-            </div>
-          </div>
-        )}
-        {snap && snap.cleared && snap.roomIndex >= snap.roomsPerFloor - 1 &&
-          snap.phase === "playing" && snap.doorOpen &&
-          gameRef.current?.room.isBoss && (
-            <div className="absolute inset-x-0 bottom-8 flex justify-center">
-              <button
-                onClick={() => gameRef.current?.ackFloorClear()}
-                className="rounded-sm border border-border bg-card px-6 py-3 font-mono-tight text-sm tracking-widest text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-              >
-                층 클리어 →
-              </button>
-            </div>
-          )}
         <ControlsHint />
       </div>
     </div>
@@ -230,136 +162,94 @@ export function TowerGame() {
 function HUD({ snap }: { snap: Snapshot | null }) {
   if (!snap) return null;
   const hpPct = Math.max(0, Math.min(1, snap.hp / snap.maxHp));
+  const xpPct = Math.max(0, Math.min(1, snap.xp / snap.xpNext));
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-border bg-card px-4 py-2 font-mono-tight text-xs">
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground">HP</span>
-          <div className="h-2 w-40 overflow-hidden rounded-sm bg-secondary">
-            <div
-              className="h-full bg-accent transition-[width] duration-100"
-              style={{ width: `${hpPct * 100}%` }}
-            />
-          </div>
-          <span>{snap.hp}/{snap.maxHp}</span>
-        </div>
-        <div className="text-muted-foreground">
-          ATK <span className="text-foreground">{snap.atk}</span>
-        </div>
+    <div className="border-b border-border bg-card font-mono-tight text-xs">
+      {/* XP 바 (상단 전체 폭) */}
+      <div className="h-1.5 w-full bg-secondary">
+        <div
+          className="h-full bg-accent transition-[width] duration-100"
+          style={{ width: `${xpPct * 100}%` }}
+        />
       </div>
-      <div className="flex items-center gap-6 text-muted-foreground">
-        <div>
-          <span className="text-foreground text-sm font-semibold">FLOOR {snap.floor}</span>
-          {snap.zoneName && (
-            <span className="ml-2 text-[10px] uppercase tracking-widest text-muted-foreground">
+      <div className="flex items-center justify-between gap-4 px-4 py-2">
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground">HP</span>
+            <div className="h-2 w-36 overflow-hidden rounded-sm bg-secondary">
+              <div
+                className="h-full bg-[#e94b3c] transition-[width] duration-100"
+                style={{ width: `${hpPct * 100}%` }}
+              />
+            </div>
+            <span>{snap.hp}/{snap.maxHp}</span>
+          </div>
+          <div className="text-muted-foreground">
+            Lv <span className="text-foreground font-semibold">{snap.level}</span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-5 text-muted-foreground">
+          <div className="text-foreground text-sm font-semibold tabular-nums">
+            {fmtTime(snap.time)}
+          </div>
+          <div>
+            T{snap.tier}
+            <span className="ml-1 text-[10px] uppercase tracking-widest">
               {snap.zoneName}
             </span>
-          )}
-          <span className="ml-2">
-            방 {Math.min(snap.roomIndex + 1, snap.roomsPerFloor)}/{snap.roomsPerFloor}
-          </span>
-        </div>
-        {snap.ruleName && (
-          <div className="rounded-sm border border-accent/40 px-2 py-0.5 text-accent">
-            {snap.ruleName} · {snap.ruleDesc}
           </div>
-        )}
-        {snap.className && (
-          <div
-            className="rounded-sm border px-2 py-0.5"
-            style={{ borderColor: (snap.classColor ?? "#888") + "66", color: snap.classColor }}
-          >
-            {snap.className}
-            {snap.killHaste && <span className="ml-1 text-accent">▲가속</span>}
+          <div>
+            처치 <span className="text-foreground">{snap.kills}</span>
           </div>
-        )}
-        <div>
-          영혼 <span className="text-foreground">{snap.souls}</span>
+          <div>
+            영혼 <span className="text-foreground">{snap.souls}</span>
+          </div>
         </div>
-      </div>
-      <div className="flex items-center gap-2">
-        {(["K", "L", "I"] as const).map((label, i) => {
-          const skill = SKILLS[snap.loadout[i]];
-          const cd = snap.skillCd[i];
-          const ready = cd <= 0.02;
-          return (
+
+        <div className="flex items-center gap-1.5">
+          {snap.weapons.map((w) => (
             <div
-              key={label}
-              className={
-                "flex h-10 w-14 flex-col items-center justify-center rounded-sm border text-center " +
-                (ready
-                  ? "border-border bg-secondary text-foreground"
-                  : "border-border/40 bg-secondary/40 text-muted-foreground")
-              }
-              title={skill?.name}
+              key={w.id}
+              className="flex h-9 min-w-[54px] flex-col items-center justify-center rounded-sm border border-border bg-secondary px-1 text-center"
+              title={w.name}
             >
-              <div className="text-[10px] tracking-widest">{label}</div>
-              <div className="text-[10px]">
-                {ready ? skill?.name.slice(0, 4) : cd.toFixed(1)}
-              </div>
+              <div className="text-[10px] leading-tight">{w.name.slice(0, 5)}</div>
+              <div className="text-[10px] text-accent">Lv{w.level}</div>
             </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function ClassSelectOverlay({
-  floor,
-  onChoose,
-}: {
-  floor: number;
-  onChoose: (id: ClassId) => void;
-}) {
-  const options: ClassId[] = ["berserker", "guardian", "assassin"];
-  return (
-    <div className="absolute inset-0 flex items-center justify-center bg-background/90 backdrop-blur-sm">
-      <div className="w-full max-w-3xl px-6">
-        <div className="mb-6 text-center">
-          <div className="font-mono-tight text-xs tracking-[0.3em] text-muted-foreground">
-            전직 제단 · FLOOR {floor}
-          </div>
-          <h2 className="mt-1 text-2xl font-bold tracking-tight">직업을 선택하라</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            이번 등반의 정체성을 결정한다. 스킬과 능력치가 바뀐다.
-          </p>
-        </div>
-        <div className="grid gap-3 md:grid-cols-3">
-          {options.map((id) => {
-            const c = CLASSES[id];
-            return (
-              <button
-                key={id}
-                onClick={() => onChoose(id)}
-                className="group relative flex h-56 flex-col items-start justify-between rounded-sm border border-border bg-card p-5 text-left transition-all hover:-translate-y-0.5 hover:bg-secondary"
-                style={{ borderColor: c.color + "44" }}
-              >
-                <div>
-                  <div
-                    className="font-mono-tight text-[10px] tracking-widest"
-                    style={{ color: c.color }}
-                  >
-                    CLASS
-                  </div>
-                  <div className="mt-1 text-lg font-semibold tracking-tight">
-                    {c.name}
-                  </div>
-                  <p className="mt-2 text-sm text-muted-foreground">{c.desc}</p>
-                </div>
-                <div className="font-mono-tight text-[10px] tracking-widest text-muted-foreground">
-                  스킬 {c.loadout.map((s) => SKILLS[s]?.name).join(" · ")}
-                </div>
-              </button>
-            );
-          })}
+          ))}
         </div>
       </div>
     </div>
   );
 }
 
-function RewardOverlay({
+function upgradeView(u: UpgradeChoice): {
+  tag: string;
+  title: string;
+  desc: string;
+  color: string;
+} {
+  if (u.kind === "weapon_new") {
+    const d = WEAPONS[u.id];
+    return { tag: "새 무기", title: d.name, desc: d.desc, color: "#ffd54a" };
+  }
+  if (u.kind === "weapon_up") {
+    const d = WEAPONS[u.id];
+    return {
+      tag: "무기 강화",
+      title: `${d.name} Lv ${u.level + 1}`,
+      desc: d.levelText(u.level + 1),
+      color: "#8fb4ff",
+    };
+  }
+  if (u.kind === "passive") {
+    return { tag: "패시브", title: u.passive.name, desc: u.passive.desc, color: "#8fe3a2" };
+  }
+  return { tag: "회복", title: "긴급 회복", desc: "HP 40 회복", color: "#f5f5f5" };
+}
+
+function LevelUpOverlay({
   snap,
   onChoose,
 }: {
@@ -370,53 +260,31 @@ function RewardOverlay({
     <div className="absolute inset-0 flex items-center justify-center bg-background/85 backdrop-blur-sm">
       <div className="w-full max-w-3xl px-6">
         <div className="mb-6 text-center">
-          <div className="font-mono-tight text-xs tracking-[0.3em] text-muted-foreground">
-            REWARD · FLOOR {snap.floor}
+          <div className="font-mono-tight text-xs tracking-[0.3em] text-accent">
+            LEVEL {snap.level}
           </div>
-          <h2 className="mt-1 text-2xl font-bold tracking-tight">보상을 선택하라</h2>
+          <h2 className="mt-1 text-2xl font-bold tracking-tight">강화를 선택하라</h2>
         </div>
-        <div className="grid gap-3 md:grid-cols-3">
-          {snap.rewards.map((r, i) => {
-            const title =
-              r.kind === "relic"
-                ? r.relic.name
-                : r.kind === "souls"
-                  ? `영혼 ${r.amount}`
-                  : "완전 회복";
-            const desc =
-              r.kind === "relic"
-                ? r.relic.desc
-                : r.kind === "souls"
-                  ? "로비 영구 성장에 쓰이는 영혼을 즉시 획득."
-                  : "HP 40 회복. 위험한 층 전에 안전 선택.";
-            const rarity = r.kind === "relic" ? r.relic.rarity : null;
-            const tag = rarity
-              ? RARITY_LABEL[rarity]
-              : r.kind === "souls"
-                ? "영혼"
-                : "회복";
-            const accentColor = rarity
-              ? RARITY_COLOR[rarity]
-              : r.kind === "souls"
-                ? "#ffd54a"
-                : "#8fb4ff";
+        <div className="grid gap-3 md:grid-cols-2">
+          {snap.upgrades.map((u, i) => {
+            const v = upgradeView(u);
             return (
               <button
                 key={i}
                 onClick={() => onChoose(i)}
-                className="group relative flex h-48 flex-col items-start justify-between rounded-sm border border-border bg-card p-5 text-left transition-all hover:-translate-y-0.5 hover:bg-secondary"
-                style={{ borderColor: accentColor + "44" }}
+                className="group relative flex h-28 flex-col items-start justify-between rounded-sm border border-border bg-card p-5 text-left transition-all hover:-translate-y-0.5 hover:bg-secondary"
+                style={{ borderColor: v.color + "44" }}
               >
-                <div>
+                <div className="flex w-full items-baseline justify-between">
+                  <div className="text-lg font-semibold tracking-tight">{v.title}</div>
                   <div
                     className="font-mono-tight text-[10px] tracking-widest"
-                    style={{ color: accentColor }}
+                    style={{ color: v.color }}
                   >
-                    {tag}
+                    {v.tag}
                   </div>
-                  <div className="mt-1 text-lg font-semibold tracking-tight">{title}</div>
                 </div>
-                <p className="text-sm text-muted-foreground">{desc}</p>
+                <p className="text-sm text-muted-foreground">{v.desc}</p>
               </button>
             );
           })}
@@ -441,7 +309,7 @@ function EndOverlay({
     <div className="absolute inset-0 flex items-center justify-center bg-background/90 backdrop-blur">
       <div className="max-w-md text-center">
         <div className="font-mono-tight text-xs tracking-[0.4em] text-muted-foreground">
-          THE TOWER
+          SURVIVORS
         </div>
         <h1 className="mt-2 text-5xl font-black tracking-tighter">{title}</h1>
         <p className="mt-3 text-sm text-muted-foreground">{subtitle}</p>
@@ -459,7 +327,7 @@ function EndOverlay({
 function ControlsHint() {
   return (
     <div className="pointer-events-none absolute bottom-2 left-2 font-mono-tight text-[10px] tracking-widest text-muted-foreground opacity-70">
-      WASD/방향키 이동 · SHIFT 대시 · J 공격 · K/L 스킬 · I 궁극기 · E 문
+      WASD/방향키 이동 · SHIFT 대시 · 공격은 자동
     </div>
   );
 }
@@ -480,7 +348,7 @@ function Lobby({
     name: string;
     desc: string;
   }[] = [
-    { key: "strength", name: "근력", desc: "레벨당 공격력 +2" },
+    { key: "strength", name: "근력", desc: "레벨당 무기 피해 계수 +2" },
     { key: "agility", name: "민첩", desc: "레벨당 이동속도 +2%, 대시 쿨 -3%" },
     { key: "vitality", name: "체력", desc: "레벨당 최대 HP +8" },
   ];
@@ -490,12 +358,12 @@ function Lobby({
         <header className="flex items-baseline justify-between border-b border-border pb-6">
           <div>
             <div className="font-mono-tight text-xs tracking-[0.4em] text-muted-foreground">
-              THE TOWER · 로비
+              THE TOWER · 생존
             </div>
             <h1 className="mt-1 text-6xl font-black leading-none tracking-tighter">탑</h1>
             <p className="mt-3 max-w-md text-sm text-muted-foreground">
-              탑은 살아있다. 매 등반은 새로운 형태로 너를 시험한다.
-              유물과 스킬로 이번 판의 강함을 조립하라 — 영구 성장은 길을 열 뿐이다.
+              끝없이 몰려오는 적들 속에서 살아남아라. 무기는 자동으로 발동된다 —
+              너는 오직 움직이며 젬을 모으고, 레벨업으로 강함을 조립할 뿐이다.
             </p>
           </div>
           <div className="text-right font-mono-tight">
@@ -532,8 +400,7 @@ function Lobby({
                         <div
                           key={i}
                           className={
-                            "h-1.5 flex-1 " +
-                            (i < lvl ? "bg-accent" : "bg-secondary")
+                            "h-1.5 flex-1 " + (i < lvl ? "bg-accent" : "bg-secondary")
                           }
                         />
                       ))}
@@ -555,8 +422,10 @@ function Lobby({
         <section className="mt-auto pt-10">
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-border pt-6">
             <div className="max-w-md text-xs text-muted-foreground">
-              조작: <span className="font-mono-tight">WASD · SHIFT · J · K · L · I · E</span>
-              <div className="mt-1">1층에는 3개의 방과 보스가 존재한다.</div>
+              조작: <span className="font-mono-tight">WASD/방향키 이동 · SHIFT 대시</span>
+              <div className="mt-1">
+                공격은 전부 자동. 적 처치 → 젬 획득 → 레벨업으로 무기·패시브를 강화하라.
+              </div>
             </div>
             <div className="flex gap-3">
               <button
@@ -569,7 +438,7 @@ function Lobby({
                 onClick={onStart}
                 className="rounded-sm border border-accent bg-accent px-8 py-3 font-mono-tight text-sm font-semibold tracking-widest text-accent-foreground transition-colors hover:brightness-110"
               >
-                등반 시작 →
+                생존 시작 →
               </button>
             </div>
           </div>
