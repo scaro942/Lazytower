@@ -1361,11 +1361,11 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     name: "연속 단검",
     desc: "가장 가까운 적에게 단검을 자동 투척",
     maxLevel: 8,
-    baseCd: 1.0,
+    baseCd: 0.85,
     levelText: (l) => `단검 ${1 + Math.floor(l / 2)}개 · 관통 ${l >= 5 ? 1 : 0}`,
     fire: (g, w) => {
       const count = 1 + Math.floor(w.level / 2) + g.stats.projAdd;
-      const dmg = wdmg(g, 9, 0.6);
+      const dmg = wdmg(g, 10, 0.65);
       const size = 14 * g.stats.areaMul;
       const pierce = w.level >= 5 ? 1 : 0;
       const base = g.aimAngleToNearest();
@@ -1393,11 +1393,11 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     name: "회전 참격",
     desc: "주변을 휩쓰는 광역 베기",
     maxLevel: 8,
-    baseCd: 1.7,
-    levelText: (l) => `반경 ${Math.round((70 + l * 14))}px`,
+    baseCd: 1.5,
+    levelText: (l) => `반경 ${Math.round((72 + l * 16))}px`,
     fire: (g, w) => {
-      const r = (70 + w.level * 14) * g.stats.areaMul;
-      const dmg = wdmg(g, 11, 0.5);
+      const r = (72 + w.level * 16) * g.stats.areaMul;
+      const dmg = wdmg(g, 12, 0.55);
       const p = g.player;
       spawnHitbox(g, {
         x: p.x - r,
@@ -1533,7 +1533,8 @@ export class Game {
   xpNext = 5;
   kills = 0;
   private spawnAccum = 0;
-  private bossTimer = 90; // 첫 보스 난입까지 시간
+  private bossTimer = 75; // 첫 보스 난입까지 시간
+  private rushTimer = 26; // 다음 링 러시까지 시간
   upgradeChoices: UpgradeChoice[] = [];
 
   phase: Phase = "playing";
@@ -1670,7 +1671,8 @@ export class Game {
     this.xpNext = 5;
     this.kills = 0;
     this.spawnAccum = 0;
-    this.bossTimer = 90;
+    this.bossTimer = 75;
+    this.rushTimer = 26;
     // 시작 무기 1개 (연속 단검)
     this.weapons = [{ id: "dagger", level: 1, cd: WEAPONS.dagger.baseCd }];
     // 넓은 생존 아레나 중앙에서 시작
@@ -2820,17 +2822,38 @@ export class Game {
 
   // ─── 생존: 적 스폰 ───────────────────────────────────────────────
   private updateSpawning(dt: number) {
-    // 시간이 갈수록 스폰 간격 단축(1.4초 → 0.25초), 최대 동시 생존 수 상한
-    const interval = Math.max(0.25, 1.4 - this.time * 0.012);
-    const cap = Math.min(220, 40 + Math.floor(this.time / 4));
     const alive = this.room.enemies.filter((e) => !e.dead).length;
+    const cap = Math.min(340, 60 + Math.floor(this.time / 2.5));
+    // 시간이 갈수록 스폰 간격 단축(1.1초 → 0.16초). 초반은 완만하게 시작.
+    const interval = Math.max(0.16, 1.1 - this.time * 0.011);
     this.spawnAccum += dt;
     while (this.spawnAccum >= interval) {
       this.spawnAccum -= interval;
-      if (alive + 1 < cap) {
-        // 30초마다 큰 무리 러시
-        const burst = Math.floor(this.time) % 30 < 1 ? 4 : 1;
-        for (let i = 0; i < burst; i++) this.spawnOne();
+      // 한 번에 1~2마리부터 시작, 시간이 지날수록 더 많이
+      const batch = 1 + Math.min(3, Math.floor(this.time / 55)) + (Math.random() < 0.3 ? 1 : 0);
+      for (let i = 0; i < batch && alive + i < cap; i++) this.spawnOne();
+    }
+
+    // 주기적 링 러시: 플레이어를 둘러싸는 큰 무리
+    this.rushTimer -= dt;
+    if (this.rushTimer <= 0) {
+      this.rushTimer = Math.max(14, 26 - this.time * 0.04);
+      const n = 7 + Math.floor(this.time / 25);
+      const canvasW = this.canvas.width / devicePixelRatioSafe();
+      const canvasH = this.canvas.height / devicePixelRatioSafe();
+      const ringR = Math.hypot(canvasW, canvasH) / 2 + 70;
+      const off = Math.random() * Math.PI * 2;
+      for (let i = 0; i < n; i++) {
+        if (alive + i >= cap) break;
+        const ang = off + (i / n) * Math.PI * 2;
+        let ex = this.player.x + Math.cos(ang) * ringR;
+        let ey = this.player.y + Math.sin(ang) * ringR;
+        ex = Math.max(ARENA_MARGIN, Math.min(this.room.w - ARENA_MARGIN, ex));
+        ey = Math.max(ARENA_MARGIN, Math.min(this.room.h - ARENA_MARGIN, ey));
+        const e = makeEnemy(pickEnemyType(this.floor), ex, ey);
+        e.hp = e.maxHp = Math.round(e.maxHp * (1 + (this.floor - 1) * 0.18));
+        e.dmg = Math.round(e.dmg * (1 + (this.floor - 1) * 0.06));
+        this.room.enemies.push(e);
       }
     }
   }
@@ -2873,27 +2896,40 @@ export class Game {
 
   // ─── 생존: 레벨업 업그레이드 ─────────────────────────────────────
   private buildUpgrades() {
-    const pool: UpgradeChoice[] = [];
+    // 가중치 있는 후보 풀 — 무기 위주로 뽑히도록 새 무기/무기강화에 높은 가중치
+    const pool: { c: UpgradeChoice; wt: number }[] = [];
+    // 새 무기 (슬롯 여유 있을 때) — 가장 우선
+    if (this.weapons.length < MAX_WEAPONS) {
+      for (const id of Object.keys(WEAPONS) as WeaponId[]) {
+        if (!this.weapons.some((w) => w.id === id)) {
+          pool.push({ c: { kind: "weapon_new", id }, wt: 6 });
+        }
+      }
+    }
     // 보유 무기 레벨업
     for (const w of this.weapons) {
       const def = WEAPONS[w.id];
-      if (w.level < def.maxLevel) pool.push({ kind: "weapon_up", id: w.id, level: w.level });
-    }
-    // 새 무기 (슬롯 여유 있을 때)
-    if (this.weapons.length < MAX_WEAPONS) {
-      for (const id of Object.keys(WEAPONS) as WeaponId[]) {
-        if (!this.weapons.some((w) => w.id === id)) pool.push({ kind: "weapon_new", id });
+      if (w.level < def.maxLevel) {
+        pool.push({ c: { kind: "weapon_up", id: w.id, level: w.level }, wt: 4 });
       }
     }
-    // 패시브
-    for (const passive of PASSIVES) pool.push({ kind: "passive", passive });
+    // 패시브 — 낮은 가중치
+    for (const passive of PASSIVES) {
+      pool.push({ c: { kind: "passive", passive }, wt: 1.5 });
+    }
 
-    // 무작위 4개 선택
+    // 가중 무복원 추출 4개
     const picks: UpgradeChoice[] = [];
     const bag = [...pool];
     while (picks.length < 4 && bag.length > 0) {
-      const i = Math.floor(Math.random() * bag.length);
-      picks.push(bag.splice(i, 1)[0]);
+      const total = bag.reduce((s, e) => s + e.wt, 0);
+      let roll = Math.random() * total;
+      let idx = 0;
+      for (let i = 0; i < bag.length; i++) {
+        roll -= bag[i].wt;
+        if (roll <= 0) { idx = i; break; }
+      }
+      picks.push(bag.splice(idx, 1)[0].c);
     }
     // 후보가 부족하면 회복으로 채운다
     while (picks.length < 3) picks.push({ kind: "heal" });
